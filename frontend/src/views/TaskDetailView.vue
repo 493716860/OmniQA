@@ -36,6 +36,9 @@
           <el-option label="依赖失败" value="DEPENDENCY_FAILED" />
           <el-option label="环境异常" value="ENVIRONMENT_ERROR" />
           <el-option label="脚本异常" value="SCRIPT_ERROR" />
+          <el-option label="响应解析失败" value="RESPONSE_PARSE_ERROR" />
+          <el-option label="超时" value="TIMEOUT" />
+          <el-option label="网络异常" value="NETWORK_ERROR" />
         </el-select>
         <span class="duration">平均耗时 {{ duration.avg }} ms / 最慢 {{ duration.max }} ms</span>
       </div>
@@ -73,7 +76,45 @@
       </el-table>
     </div>
 
-    <el-drawer v-model="drawerVisible" title="执行结果详情" size="70%">
+    <div class="panel results">
+      <div class="toolbar">
+        <h3 style="margin:0;">执行事件</h3>
+        <el-select v-model="eventFilters.level" clearable placeholder="级别" style="width: 140px" @change="loadEvents">
+          <el-option label="信息" value="INFO" />
+          <el-option label="警告" value="WARN" />
+          <el-option label="错误" value="ERROR" />
+        </el-select>
+        <el-select v-model="eventFilters.category" clearable placeholder="类别" style="width: 160px" @change="loadEvents">
+          <el-option label="任务" value="TASK" />
+          <el-option label="请求" value="REQUEST" />
+          <el-option label="断言" value="ASSERTION" />
+          <el-option label="变量提取" value="EXTRACTOR" />
+          <el-option label="依赖" value="DEPENDENCY" />
+          <el-option label="报告" value="REPORT" />
+          <el-option label="系统" value="SYSTEM" />
+        </el-select>
+        <el-button @click="loadEvents">刷新事件</el-button>
+      </div>
+      <el-table :data="eventRows" height="420">
+        <el-table-column prop="id" label="#" width="80" />
+        <el-table-column prop="created_at" label="时间" width="180" />
+        <el-table-column prop="level" label="级别" width="100">
+          <template #default="{ row }">
+            <el-tag :type="row.level === 'ERROR' ? 'danger' : (row.level === 'WARN' ? 'warning' : 'info')">
+              {{ row.level }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="category" label="类别" width="120" />
+        <el-table-column prop="object_type" label="对象" width="140" />
+        <el-table-column prop="case_code" label="用例/场景" width="140" />
+        <el-table-column prop="step_name" label="步骤" width="180" />
+        <el-table-column prop="message" label="消息" min-width="240" show-overflow-tooltip />
+      </el-table>
+      <el-empty v-if="eventRows.length === 0" description="暂无事件" />
+    </div>
+
+    <FullScreenDrawer v-model="drawerVisible" title="执行结果详情">
       <template v-if="selectedResult">
         <el-descriptions :column="2" border>
           <el-descriptions-item label="用例">{{ selectedResult.case_code }} {{ selectedResult.title }}</el-descriptions-item>
@@ -89,26 +130,36 @@
         <h3>错误</h3>
         <pre>{{ selectedResult.assertion_error }}</pre>
       </template>
-    </el-drawer>
+    </FullScreenDrawer>
   </section>
 </template>
 
 <script setup>
+/*
+ * 文件说明：
+ * 1. 接口测试任务详情页，用于展示单次任务的总体状态、接口用例结果、场景步骤结果、执行事件与 Allure 报告入口。
+ * 2. 页面依赖 taskApi 拉取任务明细，并通过定时刷新跟踪运行中任务，是 TasksView 的深入诊断页。
+ * 3. 该页与 CasesView、ScenariosView、PlansView 形成闭环：前者定义资产，计划触发执行，本页负责落地展示执行证据与失败信息。
+ */
 import { ElMessage } from 'element-plus'
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { taskApi } from '../api/resources'
+import FullScreenDrawer from '../components/common/FullScreenDrawer.vue'
 
 const id = useRoute().params.id
 const task = ref(null)
 const results = ref([])
 const stepResults = ref([])
+const events = ref([])
 const selectedResult = ref(null)
 const drawerVisible = ref(false)
 const filters = reactive({ status: '', failure_category: '' })
+const eventFilters = reactive({ level: '', category: '' })
 let timer = null
 const resultRows = computed(() => results.value.results || results.value || [])
 const stepResultRows = computed(() => stepResults.value.results || stepResults.value || [])
+const eventRows = computed(() => events.value.results || events.value || [])
 const duration = computed(() => {
   const rows = [...resultRows.value, ...stepResultRows.value]
   if (!rows.length) return { avg: 0, max: 0 }
@@ -120,6 +171,7 @@ const duration = computed(() => {
 async function load() {
   task.value = await taskApi.detail(id)
   await loadResults()
+  await loadEvents()
   if (['PASSED', 'FAILED', 'CANCELED'].includes(task.value.status) && timer) {
     clearInterval(timer)
     timer = null
@@ -132,6 +184,14 @@ async function loadResults() {
   }
   results.value = await taskApi.results(id, params)
   stepResults.value = await taskApi.stepResults(id, params)
+}
+
+async function loadEvents() {
+  const params = {
+    level: eventFilters.level || undefined,
+    category: eventFilters.category || undefined
+  }
+  events.value = await taskApi.events(id, params)
 }
 async function cancel() {
   await taskApi.cancel(id)
@@ -162,7 +222,10 @@ function categoryLabel(category) {
     REQUEST_ERROR: '请求异常',
     DEPENDENCY_FAILED: '依赖失败',
     ENVIRONMENT_ERROR: '环境异常',
-    SCRIPT_ERROR: '脚本异常'
+    SCRIPT_ERROR: '脚本异常',
+    RESPONSE_PARSE_ERROR: '响应解析失败',
+    TIMEOUT: '超时',
+    NETWORK_ERROR: '网络异常'
   }
   return labels[category] || '-'
 }

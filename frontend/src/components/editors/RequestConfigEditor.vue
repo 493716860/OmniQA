@@ -38,6 +38,12 @@
 </template>
 
 <script setup>
+/*
+ * 文件说明：
+ * 1. 请求配置聚合编辑器，统一编排 Header、Payload、Expect 与 Extractors 四类配置，并提供高级 JSON 联动面板。
+ * 2. 该组件是接口测试配置的核心复合组件，被 CasesView、ScenariosView 等页面复用，用于编辑接口用例和场景步骤的请求细节。
+ * 3. 它依赖同目录下多个子编辑器与 VariablePicker，负责在不同子配置之间协调切换与变量插入，但不承担具体业务保存逻辑。
+ */
 import { ElMessage } from 'element-plus'
 import { nextTick, ref, watch } from 'vue'
 import AssertionEditor from './AssertionEditor.vue'

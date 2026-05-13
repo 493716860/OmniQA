@@ -1,7 +1,7 @@
 <template>
   <main class="login-page">
     <el-form class="login-card" :model="form" @submit.prevent="submit">
-      <h1>Nexus API</h1>
+      <h1>OminiQA</h1>
       <el-form-item>
         <el-input v-model="form.username" placeholder="用户名" />
       </el-form-item>
@@ -14,6 +14,12 @@
 </template>
 
 <script setup>
+/*
+ * 文件说明：
+ * 1. 登录页面，负责采集用户名和密码并触发认证流程，是应用未登录状态下的主要入口。
+ * 2. 页面通过 stores/auth.js 调用登录动作，再配合 vue-router 在成功后跳转到主路由，由 MainLayout 承载后续业务页面。
+ * 3. 该文件只处理最基本的登录交互与加载状态，不承担权限控制细节，具体鉴权校验由路由与后端接口共同保障。
+ */
 import { reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'

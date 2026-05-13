@@ -1,3 +1,37 @@
+"""
+backend/api/services/importer.py
+
+文件用途
+-------
+Excel 用例导入服务（ExcelImportService）。
+
+该模块负责把“外部可维护”的 Excel 测试用例，转换成平台内部的数据模型：
+Project / Environment / Module / ApiDefinition / ApiCase。
+
+导入规则（可作为面试时讲解的“数据规范”）
+--------------------------------------
+1) 工作簿要求：
+   - 必须包含 data 页签（业务用例）
+   - 可选 setup 页签（前置/准备用例，例如登录、初始化数据）
+2) 表头要求：
+   REQUIRED_HEADERS = {id,title,subtitle,level,url,method,header,payload,expect,rely}
+   - 表头大小写不敏感，会统一 lower
+3) 字段解析：
+   - header / payload / expect 支持 JSON 或 YAML 文本；safe_parse_cell() 负责容错解析
+   - url 会 normalize_path()：若是完整 URL 仅取 path，避免把域名写死进用例
+4) 写入策略：
+   - ApiDefinition：按 (module, path, method) update_or_create
+   - ApiCase：按 (api, case_code, is_setup) update_or_create
+   - rely：导入后统一回填 dependencies（避免前向引用时找不到依赖）
+5) 默认变量提取：
+   - default_extractors() 对“登录”类用例提供 token/uid 等默认提取示例
+
+与系统其它模块的关系
+-------------------
+- Web 层入口：backend/api/views.py -> ExcelImportView 调用此服务
+- 执行引擎：backend/api/services/db_runner.py 使用 ApiCase/ApiDefinition 等数据执行
+"""
+
 import json
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath

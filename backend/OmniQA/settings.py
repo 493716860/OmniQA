@@ -1,3 +1,30 @@
+"""
+backend/OmniQA/settings.py
+
+文件用途
+-------
+Django 项目配置入口（Settings）。
+
+这个项目的设置文件刻意保持“可本地一键启动、可通过环境变量覆盖”的风格：
+- 启动时会尝试从仓库根目录的 .env 读取配置（load_project_env），但系统环境变量优先级更高
+- DB_ENGINE=sqlite 时使用 SQLite（适合面试演示/本地调试）；默认走 MySQL
+- Celery/Redis、报告目录、UI 执行参数等均提供默认值，便于开箱即用
+
+关键设计点
+-------------------------
+1) BASE_DIR / REPO_ROOT：
+   - BASE_DIR 指向 backend/
+   - REPO_ROOT 指向仓库根目录（用于读取 .env、定位 reports/、关联前端 dist）
+2) 环境变量分层：
+   - “安全敏感或部署相关”都放在 .env / 系统环境变量中（SECRET_KEY、DB、Redis）
+3) 任务系统配置：
+   - CELERY_BROKER_URL / CELERY_RESULT_BACKEND 默认从 build_redis_url() 推导
+   - OMNIQA_CELERY_EAGER=1 可让 Celery 同步执行（便于本地调试/单进程演示）
+4) 报告与产物目录：
+   - OMNIQA_REPORT_ROOT：接口任务 HTML 报告输出根目录（默认为 <repo>/reports/tasks）
+   - OMNIQA_UI_REPORT_ROOT：UI 任务产物输出根目录（默认为 <repo>/reports/ui-tasks）
+"""
+
 import os
 from pathlib import Path
 from urllib.parse import quote
@@ -64,7 +91,7 @@ else:
     DATABASES = {
         "default": {
             "ENGINE": "django.db.backends.mysql",
-            "NAME": os.getenv("MYSQL_DATABASE", "nexus_api"),
+            "NAME": os.getenv("MYSQL_DATABASE", "omniqa_api"),
             "USER": os.getenv("MYSQL_USER", "root"),
             "PASSWORD": os.getenv("MYSQL_PASSWORD", ""),
             "HOST": os.getenv("MYSQL_HOST", "127.0.0.1"),
@@ -117,8 +144,11 @@ CELERY_BROKER_TRANSPORT_OPTIONS = {
     "retry_on_timeout": False,
 }
 CELERY_RESULT_BACKEND_TRANSPORT_OPTIONS = CELERY_BROKER_TRANSPORT_OPTIONS
-CELERY_TASK_ALWAYS_EAGER = os.getenv("NEXUS_CELERY_EAGER", "0") == "1"
+CELERY_TASK_ALWAYS_EAGER = os.getenv("OMNIQA_CELERY_EAGER", "0") == "1"
 CELERY_TASK_PUBLISH_RETRY = False
-NEXUS_REPORT_ROOT = os.getenv("NEXUS_REPORT_ROOT", str(REPO_ROOT / "reports" / "tasks"))
-NEXUS_REPORT_URL = os.getenv("NEXUS_REPORT_URL", "/reports/")
-NEXUS_REQUEST_TIMEOUT = int(os.getenv("NEXUS_REQUEST_TIMEOUT", "10"))
+OMNIQA_REPORT_ROOT = os.getenv("OMNIQA_REPORT_ROOT", str(REPO_ROOT / "reports" / "tasks"))
+OMNIQA_REPORT_URL = os.getenv("OMNIQA_REPORT_URL", "/reports/")
+OMNIQA_UI_REPORT_ROOT = os.getenv("OMNIQA_UI_REPORT_ROOT", str(REPO_ROOT / "reports" / "ui-tasks"))
+OMNIQA_UI_HEADED_KEEP_OPEN_SECONDS = int(os.getenv("OMNIQA_UI_HEADED_KEEP_OPEN_SECONDS", "120"))
+OMNIQA_UI_SLOW_MO_MS = int(os.getenv("OMNIQA_UI_SLOW_MO_MS", "200"))
+OMNIQA_REQUEST_TIMEOUT = int(os.getenv("OMNIQA_REQUEST_TIMEOUT", "10"))

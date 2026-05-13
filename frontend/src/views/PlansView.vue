@@ -1,7 +1,7 @@
 <template>
   <section>
-    <h1 class="page-title">测试计划</h1>
-    <div class="panel">
+    <h1 v-if="!embedded" class="page-title">测试计划</h1>
+    <div :class="embedded ? 'embedded-panel' : 'panel'">
       <div class="toolbar plan-toolbar">
         <el-select v-model="planFilters.project" clearable placeholder="项目" style="width: 180px" @change="load">
           <el-option v-for="p in projectList" :key="p.id" :label="p.name" :value="p.id" />
@@ -22,11 +22,12 @@
             {{ formatLevels(row.levels) }}
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="260">
+        <el-table-column label="操作" width="320">
           <template #default="{ row }">
             <el-button size="small" @click="showCases(row)">用例明细</el-button>
             <el-button size="small" @click="openEdit(row)">编辑</el-button>
             <el-button size="small" type="primary" @click="run(row.id)">执行</el-button>
+            <el-button size="small" type="danger" @click="removePlan(row)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -35,7 +36,7 @@
       </el-empty>
     </div>
 
-    <el-drawer v-model="createVisible" title="新建测试计划" size="560px">
+    <FullScreenDrawer v-model="createVisible" title="新建测试计划">
       <el-form label-width="88px">
         <el-form-item label="项目">
           <el-select v-model="form.project" placeholder="项目" style="width: 100%" @change="loadCreateEnvs">
@@ -77,6 +78,23 @@
             <el-option v-for="api in apiList" :key="api.id" :label="`${api.method} ${api.path}`" :value="api.id" />
           </el-select>
         </el-form-item>
+        <el-form-item label="用例">
+          <el-select
+            v-model="form.case_ids"
+            multiple
+            filterable
+            style="width: 100%"
+            :disabled="createApiScopeDisabled"
+            @change="clearCreateScenarios"
+          >
+            <el-option
+              v-for="item in createCaseOptions"
+              :key="item.id"
+              :label="`${item.case_code} ${item.subtitle || item.title}`"
+              :value="item.id"
+            />
+          </el-select>
+        </el-form-item>
         <el-form-item label="场景">
           <el-select
             v-model="form.scenario_ids"
@@ -101,9 +119,9 @@
         <el-button @click="createVisible = false">取消</el-button>
         <el-button type="primary" @click="createPlan">创建计划</el-button>
       </template>
-    </el-drawer>
+    </FullScreenDrawer>
 
-    <el-drawer v-model="caseDrawerVisible" title="计划包含的用例" size="72%">
+    <FullScreenDrawer v-model="caseDrawerVisible" title="计划包含的用例">
       <h3>接口用例</h3>
       <el-table :data="planCases">
         <el-table-column type="index" label="顺序" width="70" />
@@ -129,9 +147,9 @@
         <el-table-column prop="level" label="等级" width="80" />
         <el-table-column prop="steps_count" label="步骤数" width="100" />
       </el-table>
-    </el-drawer>
+    </FullScreenDrawer>
 
-    <el-drawer v-model="previewVisible" title="创建前执行预览" size="72%">
+    <FullScreenDrawer v-model="previewVisible" title="创建前执行预览">
       <div class="preview-summary">
         <span>接口用例 <b>{{ preview.cases_count }}</b></span>
         <span>场景用例 <b>{{ preview.scenarios_count }}</b></span>
@@ -151,9 +169,9 @@
         <el-table-column prop="module_name" label="模块" width="140" />
         <el-table-column prop="steps_count" label="步骤数" width="100" />
       </el-table>
-    </el-drawer>
+    </FullScreenDrawer>
 
-    <el-dialog v-model="editVisible" title="编辑测试计划" width="520px">
+    <FullScreenDrawer v-model="editVisible" title="编辑测试计划">
       <el-form label-width="80px">
         <el-form-item label="项目">
           <el-select v-model="editForm.project" placeholder="项目" style="width: 100%" @change="loadEditEnvs">
@@ -204,7 +222,7 @@
             :disabled="editApiScopeDisabled"
             @change="clearEditScenarios"
           >
-            <el-option v-for="item in caseList" :key="item.id" :label="`${item.case_code} ${item.subtitle || item.title}`" :value="item.id" />
+            <el-option v-for="item in editCaseOptions" :key="item.id" :label="`${item.case_code} ${item.subtitle || item.title}`" :value="item.id" />
           </el-select>
         </el-form-item>
         <el-form-item label="场景">
@@ -230,15 +248,26 @@
         <el-button @click="editVisible = false">取消</el-button>
         <el-button type="primary" :loading="saving" @click="savePlan">保存</el-button>
       </template>
-    </el-dialog>
+    </FullScreenDrawer>
   </section>
 </template>
 
 <script setup>
-import { ElMessage } from 'element-plus'
+/*
+ * 文件说明：
+ * 1. 测试计划管理页面，用于按项目、环境、模块、接口、用例或场景组合执行范围，并支持执行预览与计划编辑。
+ * 2. 页面依赖计划、项目、环境、模块、接口、用例、场景与任务相关 API，是测试资产配置和实际任务执行之间的关键编排层。
+ * 3. 创建或编辑的计划会被 SchedulesView 用作定时调度目标，也可直接在本页触发执行并跳转到 TasksView/TaskDetailView 查看结果。
+ */
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { apiDefinitionApi, caseApi, environmentApi, moduleApi, planApi, projectApi, scenarioApi, taskApi } from '../api/resources'
+import FullScreenDrawer from '../components/common/FullScreenDrawer.vue'
+
+const { embedded = false } = defineProps({
+  embedded: { type: Boolean, default: false }
+})
 
 const router = useRouter()
 const plans = ref([])
@@ -289,6 +318,22 @@ const editHasApiScopeSelection = computed(
 )
 const editApiScopeDisabled = computed(() => editHasScenarioSelection.value && !editHasApiScopeSelection.value)
 const editScenarioDisabled = computed(() => editHasApiScopeSelection.value && !editHasScenarioSelection.value)
+
+function filterCaseOptions(allCases, moduleIds, apiIds) {
+  const list = allCases || []
+  if (Array.isArray(apiIds) && apiIds.length) {
+    const set = new Set(apiIds)
+    return list.filter(item => set.has(item.api))
+  }
+  if (Array.isArray(moduleIds) && moduleIds.length) {
+    const set = new Set(moduleIds)
+    return list.filter(item => set.has(item.module))
+  }
+  return list
+}
+
+const createCaseOptions = computed(() => filterCaseOptions(caseList.value, form.module_ids, form.api_definition_ids))
+const editCaseOptions = computed(() => filterCaseOptions(caseList.value, editForm.module_ids, editForm.api_definition_ids))
 
 async function load() {
   plans.value = await planApi.list({
@@ -506,16 +551,40 @@ async function run(plan) {
   const task = await taskApi.create({ plan })
   router.push(`/tasks/${task.id}`)
 }
+
+async function removePlan(row) {
+  await ElMessageBox.confirm(
+    `确认删除测试计划「${row.name}」？\n删除后将同时删除该计划下的历史任务记录、用例结果、事件与定时任务（如有）。`,
+    '删除测试计划',
+    { type: 'warning' }
+  )
+  try {
+    await planApi.remove(row.id)
+    ElMessage.success('测试计划已删除')
+  } catch (err) {
+    ElMessage.error(err?.response?.data?.detail || '删除失败')
+    return
+  }
+  await load()
+}
+
 async function showCases(plan) {
   const data = await planApi.cases(plan.id)
   planCases.value = data.cases || data
   planScenarios.value = data.scenarios || []
   caseDrawerVisible.value = true
 }
+
 onMounted(load)
 </script>
 
 <style scoped>
+.embedded-panel {
+  padding: 0;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+}
 .plan-toolbar {
   flex-wrap: wrap;
   align-items: flex-start;

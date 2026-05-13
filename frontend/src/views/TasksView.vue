@@ -1,7 +1,7 @@
 <template>
   <section>
-    <h1 class="page-title">执行任务</h1>
-    <div class="panel">
+    <h1 v-if="!embedded" class="page-title">执行任务</h1>
+    <div :class="embedded ? 'embedded-panel' : 'panel'">
       <div class="toolbar task-toolbar">
         <el-select v-model="filters.project" clearable placeholder="项目" style="width: 180px" @change="handleProjectChange">
           <el-option v-for="p in projectList" :key="p.id" :label="p.name" :value="p.id" />
@@ -56,9 +56,17 @@
               报告
             </el-button>
             <el-button
+              v-if="['PENDING', 'RUNNING'].includes(row.status)"
+              size="small"
+              type="warning"
+              @click="cancelTask(row)"
+            >
+              取消
+            </el-button>
+            <el-button
               size="small"
               type="danger"
-              :disabled="['PENDING', 'RUNNING'].includes(row.status)"
+              :disabled="['RUNNING'].includes(row.status)"
               @click="removeTask(row)"
             >
               删除
@@ -83,9 +91,19 @@
 </template>
 
 <script setup>
+/*
+ * 文件说明：
+ * 1. 接口测试任务列表页，用于查询、筛选和管理测试计划执行后产生的任务记录。
+ * 2. 页面依赖 taskApi、planApi 与 projectApi，承接 PlansView 和 SchedulesView 触发的执行结果，并提供报告入口。
+ * 3. 该页面聚焦任务级概览；更细粒度的用例结果、事件日志与 Allure 报告需要进入 TaskDetailView 查看。
+ */
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { planApi, projectApi, taskApi } from '../api/resources'
+
+const { embedded = false } = defineProps({
+  embedded: { type: Boolean, default: false }
+})
 
 const tasks = ref([])
 const projectList = ref([])
@@ -167,10 +185,22 @@ async function openReport(row) {
   }
 }
 
+async function cancelTask(row) {
+  await ElMessageBox.confirm(`确认取消任务 #${row.id}？`, '取消任务', { type: 'warning' })
+  await taskApi.cancel(row.id)
+  ElMessage.success('任务已取消')
+  await load()
+}
+
 async function removeTask(row) {
   await ElMessageBox.confirm(`确认删除任务 #${row.id} 的执行记录？`, '删除任务', { type: 'warning' })
-  await taskApi.remove(row.id)
-  ElMessage.success('任务记录已删除')
+  try {
+    await taskApi.remove(row.id)
+    ElMessage.success('任务记录已删除')
+  } catch (err) {
+    ElMessage.error(err?.response?.data?.detail || '删除失败')
+    return
+  }
   if (taskRows.value.length === 1 && filters.page > 1) {
     filters.page -= 1
   }
@@ -182,6 +212,15 @@ onMounted(async () => {
   await load()
 })
 </script>
+
+<style scoped>
+.embedded-panel {
+  padding: 0;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+}
+</style>
 
 <style scoped>
 .task-toolbar {

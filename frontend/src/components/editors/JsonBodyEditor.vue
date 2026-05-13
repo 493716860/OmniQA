@@ -50,6 +50,12 @@
 </template>
 
 <script setup>
+/*
+ * 文件说明：
+ * 1. 请求体编辑器组件，负责维护接口请求 payload，支持“表单化键值录入”和“Raw JSON”两种编辑方式。
+ * 2. 该组件被 RequestConfigEditor 聚合后供用例、场景步骤等页面复用，帮助业务页面避免重复实现 JSON 录入逻辑。
+ * 3. 内部主要处理对象拍平、路径回填、类型推断与 JSON 文本互转，确保前端编辑体验与后端数据结构保持一致。
+ */
 import { nextTick, ref, watch } from 'vue'
 
 const model = defineModel({ default: () => ({}) })

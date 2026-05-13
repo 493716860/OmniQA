@@ -1,19 +1,52 @@
+"""
+backend/api/services/db_runner.py
+
+文件用途
+-------
+这是 OmniQA 接口/场景执行引擎的“核心运行时”实现（DB Runner）。
+
+平台在 Web 层创建 TestTask 后，会由 Celery 异步 Worker 调用这里的逻辑完成真正的用例执行。
+它的职责不是“组织数据”（那是 views/serializers 的事），而是“按计划把用例跑起来、产出结果与报告”：
+
+1) 选择待执行对象：
+   - 接口用例（ApiCase）：来自测试计划 TestPlan 的筛选范围
+   - 场景用例（ScenarioCase）：由多个步骤（ScenarioStep）组成
+2) 解决依赖与顺序：
+   - ApiCase.dependencies / ScenarioStep.dependencies 拓扑排序
+   - 依赖失败时自动 SKIPPED，并记录失败链路
+3) 变量体系（DbVariablePool）：
+   - 三层变量注入：项目变量(ProjectVariable) / 环境变量(EnvironmentVariable) / 运行期提取变量(extractors)
+   - 支持在字符串中用 ${var} 或 ${case_code.jsonpath} 引用历史响应数据
+4) 请求执行与断言：
+   - 基于 requests.Session 复用连接与 Cookie
+   - expect 支持“简单结构匹配”与“可视化断言 __assertions”（状态码、字段存在/比较/正则等）
+   - 结构匹配通过 PactJsonVerify（宽松模式）实现
+5) 结果与可观测性：
+   - TestResult / ScenarioStepResult：保存每个用例/步骤的请求、响应、耗时、失败分类
+   - TaskEvent：结构化事件流（用于任务详情页时间线、看板统计）
+6) 报告：
+   - write_html_report() 生成轻量 HTML 报告到 settings.OMNIQA_REPORT_ROOT 对应目录
+
+面试讲解抓手
+-----------
+- “执行引擎”与“Web API”分层：API 只建任务，Runner 才是真正执行者（异步解耦、可扩展）
+- 依赖拓扑排序 + 自动跳过：保证链路稳定，失败能定位，且不会一错全错阻塞后续
+- 变量池与 Cookie 持久化：让接口用例具备“状态流转”能力，贴近真实链路
+"""
+
 import json
 import time
-from datetime import datetime, timezone as datetime_timezone
 from http.cookies import SimpleCookie
 from html import escape
 from pathlib import Path
 
 import requests
-from requests.cookies import create_cookie
 from django.conf import settings
-from django.db.models import Q
 from django.utils import timezone
 from jsonpath import jsonpath
 from pactverify.matchers import PactJsonVerify
 
-from api.models import ApiCase, EnvironmentCookie, ScenarioCase, ScenarioStepResult, TestResult, TestTask
+from api.models import ApiCase, ScenarioCase, ScenarioStepResult, TaskEvent, TestResult, TestTask
 from api.serializers import resolve_plan_scenarios
 
 
@@ -54,21 +87,39 @@ class DbTaskRunner:
         self.task = task
         self.plan = task.plan
         self.env = self.plan.environment
-        self.session = requests.Session()
-        self.variables = DbVariablePool()
-        self.variables.load_mapping(
-            {
-                item.key: item.value
-                for item in self.plan.project.variables.filter(enabled=True)
-            }
+
+        # 多账号/多角色隔离：每个 session_key 一套 requests.Session + 变量池
+        self.sessions = {}
+        self.variable_pools = {}
+
+        # 基础变量（公共配置）：项目变量 + 环境变量。每个会话变量池都会拷贝一份。
+        self.base_variable_mapping = {
+            item.key: item.value for item in self.plan.project.variables.filter(enabled=True)
+        }
+        self.base_variable_mapping.update(
+            {item.key: item.value for item in self.env.variables.filter(enabled=True)}
         )
-        self.variables.load_mapping(
-            {
-                item.key: item.value
-                for item in self.env.variables.filter(enabled=True)
-            }
-        )
-        self.load_environment_cookies()
+
+        # 默认会话
+        self.session = None
+        self.variables = None
+        self.activate_session("default")
+
+    def activate_session(self, session_key: str):
+        """
+        切换到指定会话上下文（Cookie + 运行时变量）。
+
+        - 同一 session_key：共享 Cookie 与运行时变量（extractors、历史响应快照等）
+        - 不同 session_key：相互隔离
+        """
+        key = (session_key or "default").strip() or "default"
+        if key not in self.sessions:
+            self.sessions[key] = requests.Session()
+            pool = DbVariablePool()
+            pool.load_mapping(self.base_variable_mapping)
+            self.variable_pools[key] = pool
+        self.session = self.sessions[key]
+        self.variables = self.variable_pools[key]
 
     def selected_cases(self):
         if self.plan.scenarios.exists():
@@ -123,6 +174,14 @@ class DbTaskRunner:
         return ordered
 
     def run(self):
+        TaskEvent.objects.create(
+            task=self.task,
+            level=TaskEvent.Level.INFO,
+            category=TaskEvent.Category.TASK,
+            object_type="TASK",
+            message="任务开始执行",
+            data={"plan": self.plan.id, "plan_name": self.plan.name, "environment": self.env.id},
+        )
         self.task.results.all().delete()
         self.task.step_results.all().delete()
         cases = self.selected_cases()
@@ -147,6 +206,13 @@ class DbTaskRunner:
         )
         for case in cases:
             if TestTask.objects.filter(id=self.task.id, status=TestTask.Status.CANCELED).exists():
+                TaskEvent.objects.create(
+                    task=self.task,
+                    level=TaskEvent.Level.WARN,
+                    category=TaskEvent.Category.TASK,
+                    object_type="TASK",
+                    message="任务已取消，提前结束",
+                )
                 return
             blocked_by = self.blocked_dependencies(case, failed_case_ids | skipped_case_ids)
             if blocked_by:
@@ -179,9 +245,25 @@ class DbTaskRunner:
         self.task.save()
         try:
             self.write_html_report()
+            TaskEvent.objects.create(
+                task=self.task,
+                level=TaskEvent.Level.INFO,
+                category=TaskEvent.Category.REPORT,
+                object_type="TASK",
+                message="HTML 报告已生成",
+                data={"report_html_path": self.task.report_html_path},
+            )
         except Exception as exc:
             self.task.log = f"{self.task.log}\nHTML 报告生成失败: {exc}".strip()
             self.task.save(update_fields=["log", "updated_at"])
+            TaskEvent.objects.create(
+                task=self.task,
+                level=TaskEvent.Level.ERROR,
+                category=TaskEvent.Category.REPORT,
+                object_type="TASK",
+                message="HTML 报告生成失败",
+                data={"error": str(exc)},
+            )
 
     def run_scenario(self, scenario):
         self.task.current_object_type = "SCENARIO"
@@ -236,6 +318,16 @@ class DbTaskRunner:
 
     def skip_step(self, scenario, step, blocked_by):
         message = f"依赖失败，跳过步骤: {', '.join(blocked_by)}"
+        TaskEvent.objects.create(
+            task=self.task,
+            level=TaskEvent.Level.WARN,
+            category=TaskEvent.Category.DEPENDENCY,
+            object_type="SCENARIO_STEP",
+            case_code=f"SCN-{scenario.id}",
+            step_name=step.name,
+            message=message,
+            data={"blocked_by": blocked_by},
+        )
         result = ScenarioStepResult.objects.create(
             task=self.task,
             scenario=scenario,
@@ -250,6 +342,16 @@ class DbTaskRunner:
         return result
 
     def run_step(self, scenario, step):
+        TaskEvent.objects.create(
+            task=self.task,
+            level=TaskEvent.Level.INFO,
+            category=TaskEvent.Category.REQUEST,
+            object_type="SCENARIO_STEP",
+            case_code=f"SCN-{scenario.id}",
+            step_name=step.name,
+            message="开始执行场景步骤",
+            data={"api": {"method": step.api.method, "path": step.api.path, "id": step.api.id}},
+        )
         self.task.current_object_type = "SCENARIO_STEP"
         self.task.current_case_code = f"SCN-{scenario.id}"
         self.task.current_case_title = scenario.name
@@ -273,28 +375,70 @@ class DbTaskRunner:
         response_body = ""
         request_data = {}
         try:
+            # 多会话隔离：每个步骤绑定到各自 session_key 的 Cookie/变量上下文
+            current_session_key = getattr(step, "session_key", None) or "default"
+            self.activate_session(current_session_key)
+            mismatched = [
+                dep.name
+                for dep in step.dependencies.all()
+                if (getattr(dep, "session_key", None) or "default") != current_session_key
+            ]
+            if mismatched:
+                TaskEvent.objects.create(
+                    task=self.task,
+                    level=TaskEvent.Level.WARN,
+                    category=TaskEvent.Category.DEPENDENCY,
+                    object_type="SCENARIO_STEP",
+                    case_code=f"SCN-{scenario.id}",
+                    step_name=step.name,
+                    message=f"步骤依赖跨会话，可能无法继承登录态/变量：{', '.join(mismatched)}",
+                    data={"session_key": current_session_key, "mismatched_dependencies": mismatched},
+                )
             method = step.api.method.upper()
-            url = self.build_url(step.api.path)
-            headers = self.prepare_headers({**(self.env.headers or {}), **(step.api.default_headers or {}), **(step.header or {})})
-            payload = self.replace_json(step.payload)
+
+            # 步骤可选择“引用用例（ApiCase）”，继承用例配置并允许步骤覆盖。
+            base_case = getattr(step, "case", None)
+            base_header = base_case.header if base_case else {}
+            merged_header = {**(self.env.headers or {}), **(step.api.default_headers or {}), **(base_header or {}), **(step.header or {})}
+            headers = self.prepare_headers(merged_header)
+
+            merged_payload = self.merge_json_config(base_case.payload if base_case else None, step.payload)
+            params, payload, payload_base_url = self.split_request_payload(method, merged_payload)
+            url = self.build_url(step.api.path, payload_base_url)
             request_data = {"method": method, "url": url, "headers": headers, "payload": payload}
+            if params is not None:
+                request_data["query"] = params
             response = self.session.request(
                 method,
                 url,
                 json=payload if isinstance(payload, (dict, list)) else None,
                 data=payload if not isinstance(payload, (dict, list)) else None,
+                params=params,
                 headers=headers,
                 verify=self.env.verify_ssl,
-                timeout=self.env.timeout_seconds or settings.NEXUS_REQUEST_TIMEOUT,
+                timeout=self.env.timeout_seconds or getattr(settings, "OMNIQA_REQUEST_TIMEOUT", 10),
             )
             request_data["headers"] = dict(response.request.headers)
             response_status = response.status_code
             response_body = response.text
-            actual = response.json() if response.text else {}
+            try:
+                actual = response.json() if response.text else {}
+            except Exception:
+                actual = {}
+                status = TestResult.Status.ERROR
+                failure_category = "RESPONSE_PARSE_ERROR"
+                assertion_error = "响应 JSON 解析失败"
+                raise
             self.save_session_cookies(response)
+            if base_case and getattr(base_case, "case_code", None):
+                self.variables.save(base_case.case_code, actual)
             self.variables.save(f"step_{step.id}", actual)
+            if base_case:
+                self.apply_extractors(base_case, actual)
             self.apply_extractors(step, actual)
-            expect = self.replace_json(step.expect) if step.expect else {}
+
+            merged_expect = self.merge_json_config(base_case.expect if base_case else None, step.expect)
+            expect = self.replace_json(merged_expect) if merged_expect else {}
             expected_status = self.expected_status_code(expect)
             if response.status_code != expected_status:
                 status = TestResult.Status.FAILED
@@ -306,10 +450,18 @@ class DbTaskRunner:
             status = TestResult.Status.FAILED
             failure_category = "ASSERTION_FAILED"
             assertion_error = str(exc)
+        except requests.exceptions.Timeout as exc:
+            status = TestResult.Status.ERROR
+            failure_category = "TIMEOUT"
+            assertion_error = str(exc)
+        except requests.exceptions.RequestException as exc:
+            status = TestResult.Status.ERROR
+            failure_category = "NETWORK_ERROR"
+            assertion_error = str(exc)
         except Exception as exc:
             status = TestResult.Status.ERROR
-            failure_category = "SCRIPT_ERROR"
-            assertion_error = str(exc)
+            failure_category = failure_category or "SCRIPT_ERROR"
+            assertion_error = assertion_error or str(exc)
         duration_ms = int((time.monotonic() - start) * 1000)
         result = ScenarioStepResult.objects.create(
             task=self.task,
@@ -326,6 +478,22 @@ class DbTaskRunner:
             assertion_error=assertion_error,
         )
         self.update_progress("执行中")
+        if result.status in [TestResult.Status.FAILED, TestResult.Status.ERROR, TestResult.Status.SKIPPED]:
+            TaskEvent.objects.create(
+                task=self.task,
+                level=TaskEvent.Level.ERROR if result.status != TestResult.Status.SKIPPED else TaskEvent.Level.WARN,
+                category=TaskEvent.Category.ASSERTION if failure_category == "ASSERTION_FAILED" else TaskEvent.Category.REQUEST,
+                object_type="SCENARIO_STEP",
+                case_code=f"SCN-{scenario.id}",
+                step_name=step.name,
+                message=f"场景步骤结束: {result.status}",
+                data={
+                    "status": result.status,
+                    "failure_category": failure_category,
+                    "assertion_error": assertion_error,
+                    "response_status": response_status,
+                },
+            )
         return result
 
     def blocked_dependencies(self, case, blocked_ids):
@@ -337,6 +505,15 @@ class DbTaskRunner:
 
     def skip_case(self, case, blocked_by):
         message = f"依赖失败，跳过执行: {', '.join(blocked_by)}"
+        TaskEvent.objects.create(
+            task=self.task,
+            level=TaskEvent.Level.WARN,
+            category=TaskEvent.Category.DEPENDENCY,
+            object_type="API_CASE",
+            case_code=case.case_code,
+            message=message,
+            data={"blocked_by": blocked_by},
+        )
         result = TestResult.objects.create(
             task=self.task,
             case=case,
@@ -351,6 +528,15 @@ class DbTaskRunner:
         return result
 
     def run_case(self, case):
+        TaskEvent.objects.create(
+            task=self.task,
+            level=TaskEvent.Level.INFO,
+            category=TaskEvent.Category.REQUEST,
+            object_type="API_CASE",
+            case_code=case.case_code,
+            message="开始执行用例",
+            data={"api": {"method": case.api.method, "path": case.api.path, "id": case.api.id}},
+        )
         self.task.current_object_type = "API_CASE"
         self.task.current_case = case
         self.task.current_case_code = case.case_code
@@ -375,24 +561,52 @@ class DbTaskRunner:
         request_data = {}
         result = None
         try:
+            # 多会话隔离：每个用例绑定到各自 session_key 的 Cookie/变量上下文
+            current_session_key = getattr(case, "session_key", None) or "default"
+            self.activate_session(current_session_key)
+            mismatched = [
+                dep.case_code
+                for dep in case.dependencies.all()
+                if (getattr(dep, "session_key", None) or "default") != current_session_key
+            ]
+            if mismatched:
+                TaskEvent.objects.create(
+                    task=self.task,
+                    level=TaskEvent.Level.WARN,
+                    category=TaskEvent.Category.DEPENDENCY,
+                    object_type="API_CASE",
+                    case_code=case.case_code,
+                    message=f"用例依赖跨会话，可能无法继承登录态/变量：{', '.join(mismatched)}",
+                    data={"session_key": current_session_key, "mismatched_dependencies": mismatched},
+                )
             method = case.api.method.upper()
-            url = self.build_url(case.api.path)
             headers = self.prepare_headers({**(self.env.headers or {}), **(case.header or {})})
-            payload = self.replace_json(case.payload)
+            params, payload, payload_base_url = self.split_request_payload(method, case.payload)
+            url = self.build_url(case.api.path, payload_base_url)
             request_data = {"method": method, "url": url, "headers": headers, "payload": payload}
+            if params is not None:
+                request_data["query"] = params
             response = self.session.request(
                 method,
                 url,
                 json=payload if isinstance(payload, (dict, list)) else None,
                 data=payload if not isinstance(payload, (dict, list)) else None,
+                params=params,
                 headers=headers,
                 verify=self.env.verify_ssl,
-                timeout=self.env.timeout_seconds or settings.NEXUS_REQUEST_TIMEOUT,
+                timeout=self.env.timeout_seconds or getattr(settings, "OMNIQA_REQUEST_TIMEOUT", 10),
             )
             request_data["headers"] = dict(response.request.headers)
             response_status = response.status_code
             response_body = response.text
-            actual = response.json() if response.text else {}
+            try:
+                actual = response.json() if response.text else {}
+            except Exception:
+                actual = {}
+                status = TestResult.Status.ERROR
+                failure_category = "RESPONSE_PARSE_ERROR"
+                assertion_error = "响应 JSON 解析失败"
+                raise
             self.save_session_cookies(response)
             self.variables.save(case.case_code, actual)
             self.apply_extractors(case, actual)
@@ -408,10 +622,18 @@ class DbTaskRunner:
             status = TestResult.Status.FAILED
             failure_category = "ASSERTION_FAILED"
             assertion_error = str(exc)
+        except requests.exceptions.Timeout as exc:
+            status = TestResult.Status.ERROR
+            failure_category = "TIMEOUT"
+            assertion_error = str(exc)
+        except requests.exceptions.RequestException as exc:
+            status = TestResult.Status.ERROR
+            failure_category = "NETWORK_ERROR"
+            assertion_error = str(exc)
         except Exception as exc:
             status = TestResult.Status.ERROR
-            failure_category = "SCRIPT_ERROR"
-            assertion_error = str(exc)
+            failure_category = failure_category or "SCRIPT_ERROR"
+            assertion_error = assertion_error or str(exc)
         finally:
             duration_ms = int((time.monotonic() - start) * 1000)
             result = TestResult.objects.create(
@@ -429,6 +651,21 @@ class DbTaskRunner:
             )
             if not case.is_setup:
                 self.update_progress("执行中")
+        if result.status in [TestResult.Status.FAILED, TestResult.Status.ERROR, TestResult.Status.SKIPPED]:
+            TaskEvent.objects.create(
+                task=self.task,
+                level=TaskEvent.Level.ERROR if result.status != TestResult.Status.SKIPPED else TaskEvent.Level.WARN,
+                category=TaskEvent.Category.ASSERTION if failure_category == "ASSERTION_FAILED" else TaskEvent.Category.REQUEST,
+                object_type="API_CASE",
+                case_code=case.case_code,
+                message=f"用例结束: {result.status}",
+                data={
+                    "status": result.status,
+                    "failure_category": failure_category,
+                    "assertion_error": assertion_error,
+                    "response_status": response_status,
+                },
+            )
         return result
 
     def apply_extractors(self, case, actual):
@@ -461,7 +698,7 @@ class DbTaskRunner:
             self.variables.save_value("cookie", cookie_header)
             self.variables.save_value("cookies", cookie_header)
             self.variables.save_value("cookie_header", cookie_header)
-        self.persist_environment_cookies()
+        # Cookie 仅任务内存：不再写入 EnvironmentCookie（环境级持久化）
 
     def prepare_headers(self, headers):
         prepared = self.replace_json(headers or {})
@@ -471,40 +708,40 @@ class DbTaskRunner:
             if value not in ("", None) and key.lower() not in {"host", "cookie"}
         }
 
-    def load_environment_cookies(self):
-        now = timezone.now()
-        cookies = self.env.cookies.filter(enabled=True).filter(Q(expires_at__isnull=True) | Q(expires_at__gt=now))
-        for item in cookies:
-            cookie = create_cookie(
-                name=item.name,
-                value=item.value,
-                domain=item.domain,
-                path=item.path or "/",
-                secure=item.secure,
-                expires=int(item.expires_at.timestamp()) if item.expires_at else None,
-                rest={"HttpOnly": item.http_only},
-            )
-            self.session.cookies.set_cookie(cookie)
+    def split_request_payload(self, method, payload):
+        normalized = self.replace_json(payload)
+        params = None
+        body = normalized
+        base_url = None
+        if isinstance(normalized, dict) and ("__query" in normalized or "__body" in normalized):
+            params = normalized.get("__query") or None
+            body = normalized.get("__body")
+            base_url = normalized.get("__base_url") or None
+        elif isinstance(normalized, dict) and "__base_url" in normalized and len(normalized) == 1:
+            base_url = normalized.get("__base_url") or None
+            body = None
+        elif method.upper() == "GET" and isinstance(normalized, dict):
+            params = normalized or None
+            body = None
+        if body in ({}, "", None):
+            body = None
+        return params, body, base_url
 
-    def persist_environment_cookies(self):
-        for cookie in self.session.cookies:
-            expires_at = None
-            if cookie.expires:
-                expires_at = datetime.fromtimestamp(cookie.expires, tz=datetime_timezone.utc)
-            rest = getattr(cookie, "_rest", {}) or {}
-            EnvironmentCookie.objects.update_or_create(
-                environment=self.env,
-                domain=cookie.domain or "",
-                path=cookie.path or "/",
-                name=cookie.name,
-                defaults={
-                    "value": cookie.value or "",
-                    "expires_at": expires_at,
-                    "secure": bool(cookie.secure),
-                    "http_only": "HttpOnly" in rest,
-                    "enabled": True,
-                },
-            )
+    def merge_json_config(self, base, override):
+        """
+        用于用例继承 + 步骤覆盖的浅合并：
+        - override 为空（None/''/{}）：返回 base
+        - base 为空：返回 override
+        - dict + dict：浅合并（override 覆盖同名 key）
+        - 其他类型：以 override 为准
+        """
+        if override in (None, "", {}):
+            return base
+        if base in (None, "", {}):
+            return override
+        if isinstance(base, dict) and isinstance(override, dict):
+            return {**base, **override}
+        return override
 
     def update_progress(self, message):
         done = self.task.results.filter(case__is_setup=False).count() + self.task.step_results.count()
@@ -515,7 +752,8 @@ class DbTaskRunner:
         ).count() + self.task.step_results.filter(status=TestResult.Status.PASSED).count()
         self.task.failed_count = self.task.results.filter(
             case__is_setup=False, status__in=[TestResult.Status.FAILED, TestResult.Status.ERROR]
-        ).count() + self.task.step_results.filter(status__in=[TestResult.Status.FAILED, TestResult.Status.ERROR]).count()
+        ).count() + self.task.step_results.filter(
+            status__in=[TestResult.Status.FAILED, TestResult.Status.ERROR]).count()
         self.task.skipped_count = self.task.results.filter(
             case__is_setup=False, status=TestResult.Status.SKIPPED
         ).count() + self.task.step_results.filter(status=TestResult.Status.SKIPPED).count()
@@ -531,10 +769,23 @@ class DbTaskRunner:
             ]
         )
 
-    def build_url(self, path):
-        if path.startswith("http://") or path.startswith("https://"):
-            return path
-        return f"{self.env.base_url.rstrip('/')}/{path.lstrip('/')}"
+    # 🚀 这里是你需要但是遗漏的跨域 URL 修复逻辑
+    def build_url(self, path, base_url=None):
+        # 1. 优先对 path 进行变量解析（支持 ${domain}/api/v1 这种动态赋值形式）
+        replaced_path = self.variables.replace(str(path or "")).strip()
+
+        # 2. 判断解析后是否已经是绝对路径，如果是，直接返回（彻底忽略环境 base_url，完美支持跨域）
+        if replaced_path.startswith("http://") or replaced_path.startswith("https://"):
+            return replaced_path
+
+        # 3. 对 base_url 也进行变量解析，支持动态环境前缀
+        raw_base_url = base_url if base_url is not None else getattr(self.env, "base_url", "")
+        effective_base_url = self.variables.replace(str(raw_base_url or "")).strip()
+
+        if not effective_base_url:
+            return replaced_path
+
+        return f"{effective_base_url.rstrip('/')}/{replaced_path.lstrip('/')}"
 
     def replace_json(self, value):
         raw = json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else str(value)
@@ -591,6 +842,37 @@ class DbTaskRunner:
             if operator == "contains":
                 assert str(expected) in str(actual_value), (
                     f"字段包含断言失败: {path}, 期望包含 {expected}, 实际 {actual_value}"
+                )
+            elif operator == "not_equals":
+                assert actual_value != expected, (
+                    f"字段不等于断言失败: {path}, 期望不等于 {expected}, 实际 {actual_value}"
+                )
+            elif operator in {"gt", "gte", "lt", "lte"}:
+                try:
+                    left = float(actual_value)
+                    right = float(expected)
+                except Exception:
+                    raise AssertionError(f"字段比较断言要求数字: {path}, 实际 {actual_value}, 期望 {expected}")
+                if operator == "gt":
+                    assert left > right, f"字段大于断言失败: {path}, 期望 > {right}, 实际 {left}"
+                elif operator == "gte":
+                    assert left >= right, f"字段大于等于断言失败: {path}, 期望 >= {right}, 实际 {left}"
+                elif operator == "lt":
+                    assert left < right, f"字段小于断言失败: {path}, 期望 < {right}, 实际 {left}"
+                else:
+                    assert left <= right, f"字段小于等于断言失败: {path}, 期望 <= {right}, 实际 {left}"
+            elif operator == "regex":
+                import re
+                assert re.search(str(expected), str(actual_value) or ""), (
+                    f"正则断言失败: {path}, 期望匹配 {expected}, 实际 {actual_value}"
+                )
+            elif operator == "in":
+                assert actual_value in (expected or []), (
+                    f"包含于断言失败: {path}, 期望在 {expected}, 实际 {actual_value}"
+                )
+            elif operator == "not_in":
+                assert actual_value not in (expected or []), (
+                    f"不包含于断言失败: {path}, 期望不在 {expected}, 实际 {actual_value}"
                 )
             else:
                 assert actual_value == expected, (
@@ -681,7 +963,8 @@ class DbTaskRunner:
         max_duration = max(durations) if durations else 0
         total_count = len(all_results) if self.plan.scenarios.exists() else self.task.total_count
         passed_count = len([item for item in all_results if item.status == TestResult.Status.PASSED])
-        failed_count = len([item for item in all_results if item.status in [TestResult.Status.FAILED, TestResult.Status.ERROR]])
+        failed_count = len(
+            [item for item in all_results if item.status in [TestResult.Status.FAILED, TestResult.Status.ERROR]])
         skipped_count = len([item for item in all_results if item.status == TestResult.Status.SKIPPED])
         report_status = TestTask.Status.FAILED if failed_count else self.task.status
         if total_count and passed_count + failed_count + skipped_count >= total_count and not failed_count:
@@ -727,7 +1010,8 @@ class DbTaskRunner:
         failure_cards = []
         for item in failed_items:
             title = getattr(item, "case_code", "") or getattr(item, "step_name", "")
-            subtitle = getattr(item, "title", "") or getattr(item, "scenario_name", "") or getattr(getattr(item, "scenario", None), "name", "")
+            subtitle = getattr(item, "title", "") or getattr(item, "scenario_name", "") or getattr(
+                getattr(item, "scenario", None), "name", "")
             request_data = short_text(getattr(item, "request_data", {}), 700)
             response_body = short_text(getattr(item, "response_body", ""), 700)
             failure_cards.append(

@@ -19,7 +19,12 @@
         <el-table-column prop="description" label="说明" />
         <el-table-column prop="enabled" label="启用" width="80" />
         <el-table-column label="操作" width="150">
-          <template #default="{ row }"><el-button size="small" @click="openEdit('project', row)">编辑</el-button></template>
+          <template #default="{ row }">
+            <el-button size="small" @click="openEdit('project', row)">编辑</el-button>
+            <el-popconfirm title="确定要删除此变量吗？" @confirm="remove('project', row.id)">
+              <template #reference><el-button size="small" type="danger" plain>删除</el-button></template>
+            </el-popconfirm>
+          </template>
         </el-table-column>
       </el-table>
       <h3>环境变量</h3>
@@ -29,7 +34,12 @@
         <el-table-column prop="description" label="说明" />
         <el-table-column prop="enabled" label="启用" width="80" />
         <el-table-column label="操作" width="150">
-          <template #default="{ row }"><el-button size="small" @click="openEdit('environment', row)">编辑</el-button></template>
+          <template #default="{ row }">
+            <el-button size="small" @click="openEdit('environment', row)">编辑</el-button>
+            <el-popconfirm title="确定要删除此变量吗？" @confirm="remove('environment', row.id)">
+              <template #reference><el-button size="small" type="danger" plain>删除</el-button></template>
+            </el-popconfirm>
+          </template>
         </el-table-column>
       </el-table>
     </div>
@@ -46,6 +56,12 @@
 </template>
 
 <script setup>
+/*
+ * 文件说明：
+ * 1. 变量管理页面，用于维护项目变量和环境变量，支持测试执行时的动态参数注入。
+ * 2. 页面依赖项目、环境以及变量相关 API，和 RequestConfigEditor 中的变量引用能力形成前后呼应。
+ * 3. 这里配置的变量会被接口用例、场景步骤、页面对象或 UI 运行过程引用，是跨模块共享配置的重要入口。
+ */
 import { ElMessage } from 'element-plus'
 import { onMounted, reactive, ref, watch } from 'vue'
 import { environmentApi, environmentVariableApi, projectApi, projectVariableApi } from '../api/resources'
@@ -68,14 +84,15 @@ async function load() {
   await loadVars()
 }
 async function loadEnvs() {
+  if (!project.value) return
   const e = await environmentApi.list({ project: project.value })
   envs.value = e.results || e
   if (!environment.value && envs.value.length) environment.value = envs.value[0].id
 }
 async function loadVars() {
   const [pv, ev] = await Promise.all([
-    projectVariableApi.list({ project: project.value }),
-    environment ? environmentVariableApi.list({ environment: environment.value }) : []
+    project.value ? projectVariableApi.list({ project: project.value }) : [],
+    environment.value ? environmentVariableApi.list({ environment: environment.value }) : []
   ])
   projectVars.value = pv.results || pv
   environmentVars.value = ev.results || ev
@@ -101,6 +118,15 @@ async function save() {
   }
   ElMessage.success('已保存')
   visible.value = false
+  await loadVars()
+}
+async function remove(scopeType, id) {
+  if (scopeType === 'project') {
+    await projectVariableApi.remove(id)
+  } else {
+    await environmentVariableApi.remove(id)
+  }
+  ElMessage.success('已删除')
   await loadVars()
 }
 watch([project, environment], loadVars)

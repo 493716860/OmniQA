@@ -1,9 +1,9 @@
 <template>
   <section>
-    <h1 class="page-title">定时任务</h1>
-    <div class="panel">
+    <h1 v-if="!embedded" class="page-title">定时任务</h1>
+    <div :class="embedded ? 'embedded-panel' : 'panel'">
       <div class="toolbar">
-        <el-button type="primary" @click="openCreate">新增定时任务</el-button>
+        <el-button type="primary" @click="openCreate">新建定时任务</el-button>
         <el-button @click="load">刷新</el-button>
       </div>
       <el-table :data="rows">
@@ -21,8 +21,8 @@
         </el-table-column>
       </el-table>
     </div>
-    <el-dialog v-model="visible" title="定时任务" width="620px">
-      <el-form label-width="100px">
+    <FullScreenDrawer v-model="visible" title="定时任务">
+      <el-form label-width="110px" style="max-width: 920px;">
         <el-form-item label="名称"><el-input v-model="form.name" /></el-form-item>
         <el-form-item label="测试计划">
           <el-select v-model="form.plan" style="width:100%">
@@ -55,15 +55,29 @@
         </el-form-item>
         <el-form-item label="启用"><el-switch v-model="form.enabled" /></el-form-item>
       </el-form>
-      <template #footer><el-button @click="visible=false">取消</el-button><el-button type="primary" @click="save">保存</el-button></template>
-    </el-dialog>
+      <template #footer>
+        <el-button @click="visible=false">取消</el-button>
+        <el-button type="primary" @click="save">保存</el-button>
+      </template>
+    </FullScreenDrawer>
   </section>
 </template>
 
 <script setup>
+/*
+ * 文件说明：
+ * 1. 定时任务管理页面，负责把测试计划配置为周期执行任务，并支持启停、编辑和立即执行。
+ * 2. 页面依赖 scheduleApi 与 planApi，是测试计划的调度层入口，和 DashboardView 中的定时健康指标存在直接关联。
+ * 3. 它只维护调度规则，不展示执行细节；实际运行结果需要在 TasksView 或对应任务详情页中查看。
+ */
 import { ElMessage } from 'element-plus'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { planApi, scheduleApi } from '../api/resources'
+import FullScreenDrawer from '../components/common/FullScreenDrawer.vue'
+
+const { embedded = false } = defineProps({
+  embedded: { type: Boolean, default: false }
+})
 
 const schedules = ref([])
 const plans = ref([])
@@ -100,3 +114,12 @@ async function runNow(row) {
 }
 onMounted(load)
 </script>
+
+<style scoped>
+.embedded-panel {
+  padding: 0;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+}
+</style>

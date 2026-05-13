@@ -1,3 +1,17 @@
+"""
+backend/api/management/commands/import_sample_cases.py
+
+文件用途
+-------
+管理命令：导入样例 Excel 用例（默认 data/控制台首页.xlsx）。
+
+使用场景：
+- 本地首次启动后，数据库为空；通过该命令快速灌入一套可跑的演示数据
+- 面试/演示时“一键准备数据”，减少手工操作
+
+核心逻辑复用 services/importer.py 的 ExcelImportService，避免两套导入实现。
+"""
+
 from pathlib import Path
 
 from django.core.management.base import BaseCommand, CommandError

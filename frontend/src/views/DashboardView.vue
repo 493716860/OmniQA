@@ -73,6 +73,27 @@
       </div>
 
       <div class="panel">
+        <div class="panel-title">失败原因分布（近 7 天）</div>
+        <el-table :data="quality.failure_categories" size="small">
+          <el-table-column prop="failure_category" label="分类" />
+          <el-table-column prop="count" label="次数" width="90" />
+        </el-table>
+      </div>
+
+      <div class="panel">
+        <div class="panel-title">最慢接口 Top 5（近 7 天）</div>
+        <el-table :data="quality.slow_interfaces" size="small">
+          <el-table-column label="接口">
+            <template #default="{ row }">
+              <span class="method">{{ row.case__api__method }}</span> {{ row.case__api__path }}
+            </template>
+          </el-table-column>
+          <el-table-column prop="avg_duration_ms" label="平均(ms)" width="110" />
+          <el-table-column prop="max_duration_ms" label="最慢(ms)" width="110" />
+        </el-table>
+      </div>
+
+      <div class="panel">
         <div class="panel-title">不稳定用例 Top 5</div>
         <el-table :data="quality.flaky_cases" size="small">
           <el-table-column prop="case_code" label="ID" width="110" />
@@ -112,6 +133,12 @@
 </template>
 
 <script setup>
+/*
+ * 文件说明：
+ * 1. 质量驾驶舱首页，集中展示接口测试平台的核心度量，如通过率、失败趋势、环境健康度、治理指标与覆盖率。
+ * 2. 该页面依赖 dashboardApi 拉取聚合统计结果，是登录后进入 MainLayout 后的总览入口，用于辅助测试运营和问题定位。
+ * 3. 页面只负责可视化展示后端汇总数据，不维护复杂编辑状态，也不会直接修改测试资产。
+ */
 import { computed, onMounted, ref } from 'vue'
 import { dashboardApi } from '../api/resources'
 
@@ -120,6 +147,8 @@ const quality = ref({
   trend: [],
   failed_modules: [],
   failed_interfaces: [],
+  failure_categories: [],
+  slow_interfaces: [],
   flaky_cases: [],
   schedule_health: {},
   environment_health: {},

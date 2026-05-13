@@ -41,6 +41,12 @@
 </template>
 
 <script setup>
+/*
+ * 文件说明：
+ * 1. Excel 导入页面，用于把外部整理好的测试资产批量导入平台，并自动生成项目、模块、环境与接口用例等数据。
+ * 2. 页面依赖 importApi.excel，与 CasesView、PlansView 形成上下游关系：先导入测试资产，再查看用例或创建测试计划。
+ * 3. 该页面只负责前端表单采集、文件上传与结果展示，真正的解析和入库逻辑由后端导入服务处理。
+ */
 import { reactive, ref } from 'vue'
 import { importApi } from '../api/resources'
 

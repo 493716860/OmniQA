@@ -1,11 +1,36 @@
+/*
+ * frontend/src/styles/global.css
+ *
+ * 文件用途
+ * -------
+ * 前端全局样式与设计变量。
+ *
+ * 主要内容：
+ * 1. 定义主题色、背景色、文字色、边框色等 CSS 变量
+ * 2. 提供全局基础样式（box-sizing、body、标题、工具栏）
+ * 3. 提供通用容器样式 `.panel`，用于统一后台页面的卡片视觉风格
+ *
+ * 说明：
+ * - 该文件只放“跨页面复用”的样式规则
+ * - 页面私有样式更适合放在各自的 `.vue` 文件中维护
+ */
+
+:root {
+  --primary-color: #3b82f6;
+  --primary-hover: #2563eb;
+  --bg-color: #f5f7fb;
+  --text-main: #1f2937;
+  --border-color: #e5e7eb;
+}
+
 * {
   box-sizing: border-box;
 }
 
 body {
   margin: 0;
-  color: #1f2937;
-  background: #f5f7fb;
+  color: var(--text-main);
+  background: var(--bg-color);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
@@ -13,6 +38,7 @@ body {
   margin: 0 0 16px;
   font-size: 22px;
   font-weight: 650;
+  color: var(--primary-color);
 }
 
 .toolbar {
@@ -22,9 +48,13 @@ body {
   margin-bottom: 16px;
 }
 
+/* 引入轻量的毛玻璃效果（Frosted Glass），提升开源产品现代感 */
 .panel {
   padding: 18px;
-  background: #fff;
-  border: 1px solid #e5e7eb;
-  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 12px;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
 }

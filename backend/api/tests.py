@@ -1,3 +1,21 @@
+"""
+backend/api/tests.py
+
+文件用途
+-------
+后端自动化测试（pytest 风格写在 Django TestCase 中）。
+
+覆盖重点：
+- 测试计划 TestPlan：创建校验、范围冲突（场景 vs 接口范围）、预览逻辑
+- 执行任务 TestTask：创建后应立即返回（异步投递不阻塞）、投递失败记录、删除限制
+- 场景执行：只统计/返回场景步骤结果（避免混入历史接口结果）
+- cURL 导入：解析能力、限制项（文件上传/非法命令）、落库结果，以及跨域 base_url 执行验证
+
+说明
+----
+这份测试对面试讲解很加分：它体现了你对业务规则的“可验证性”与对异步边界的理解。
+"""
+
 from django.contrib.auth import get_user_model
 from django.test import TestCase, TransactionTestCase
 from time import perf_counter, sleep
@@ -18,6 +36,7 @@ from .models import (
     TestTask,
 )
 from .services.db_runner import DbTaskRunner
+from .services.curl_importer import CurlImportError, CurlImportService
 from .serializers import resolve_plan_cases
 
 
@@ -316,3 +335,230 @@ class TestTaskApiTests(TransactionTestCase):
         self.assertEqual(response.status_code, 200)
         rows = response.data.get("results", response.data)
         self.assertEqual(rows[0]["scenario_name"], "执行时场景")
+
+
+class CurlImportServiceTests(TestCase):
+    def setUp(self):
+        self.project = Project.objects.create(name="项目A")
+        self.module = Module.objects.create(project=self.project, name="模块A")
+        self.service = CurlImportService()
+
+    def test_parse_json_curl_and_create_api_case(self):
+        result = self.service.import_curl(
+            module_id=self.module.id,
+            curl_text=(
+                "curl 'https://example.com/api/login?tenant=oms' "
+                "-H 'Content-Type: application/json' "
+                "-H 'Authorization: Bearer token' "
+                "--data-raw '{\"username\":\"ron\",\"password\":\"123456\"}'"
+            ),
+            name="登录接口",
+            case_title="登录默认用例",
+        )
+
+        self.assertEqual(result["parsed"]["method"], "POST")
+        self.assertEqual(result["parsed"]["base_url"], "https://example.com")
+        self.assertEqual(result["parsed"]["path"], "/api/login")
+        self.assertEqual(result["parsed"]["query"], {"tenant": "oms"})
+        self.assertEqual(result["parsed"]["payload"], {"username": "ron", "password": "123456"})
+        api = ApiDefinition.objects.get(id=result["api_definition"]["id"])
+        case = ApiCase.objects.get(id=result["api_case"]["id"])
+        self.assertEqual(api.name, "登录接口")
+        self.assertEqual(api.default_headers["Authorization"], "Bearer token")
+        self.assertEqual(
+            case.payload,
+            {
+                "__base_url": "https://example.com",
+                "__query": {"tenant": "oms"},
+                "__body": {"username": "ron", "password": "123456"},
+            },
+        )
+        self.assertEqual(case.title, "登录默认用例")
+        self.assertEqual(case.subtitle, "cURL 导入默认用例")
+
+    def test_parse_form_curl_payload_as_object(self):
+        result = self.service.import_curl(
+            module_id=self.module.id,
+            curl_text=(
+                "curl --request POST 'https://example.com/api/form' "
+                "--header 'Content-Type: application/x-www-form-urlencoded' "
+                "--data-raw 'code=1001&name=ron'"
+            ),
+        )
+
+        self.assertEqual(result["parsed"]["payload"], {"code": "1001", "name": "ron"})
+        case = ApiCase.objects.get(id=result["api_case"]["id"])
+        self.assertEqual(
+            case.payload,
+            {"__base_url": "https://example.com", "__body": {"code": "1001", "name": "ron"}},
+        )
+
+    def test_reuse_existing_api_and_fill_missing_headers(self):
+        api = ApiDefinition.objects.create(
+            module=self.module,
+            name="已维护接口",
+            path="/api/login",
+            method="POST",
+            default_headers={"X-Trace-Id": "keep-me"},
+        )
+        existing_case = ApiCase.objects.create(
+            api=api,
+            case_code=f"CURL_AUTO_{api.id}",
+            title="旧默认用例",
+            subtitle="cURL 导入默认用例",
+        )
+
+        result = self.service.import_curl(
+            module_id=self.module.id,
+            curl_text=(
+                "curl 'https://example.com/api/login' "
+                "-H 'Content-Type: application/json' "
+                "--data-raw '{\"hello\":\"world\"}'"
+            ),
+        )
+
+        api.refresh_from_db()
+        existing_case.refresh_from_db()
+        self.assertEqual(result["action"]["api_definition"], "updated")
+        self.assertEqual(result["action"]["api_case"], "updated")
+        self.assertEqual(api.name, "已维护接口")
+        self.assertEqual(api.default_headers["X-Trace-Id"], "keep-me")
+        self.assertEqual(api.default_headers["Content-Type"], "application/json")
+        self.assertEqual(existing_case.payload, {"__base_url": "https://example.com", "__body": {"hello": "world"}})
+
+    def test_parse_rejects_invalid_curl(self):
+        with self.assertRaises(CurlImportError):
+            self.service.import_curl(module_id=self.module.id, curl_text="not-a-curl")
+
+    def test_parse_get_query_into_special_payload(self):
+        result = self.service.import_curl(
+            module_id=self.module.id,
+            curl_text="curl 'https://example.com/api/users?page=1&size=20' --compressed",
+        )
+
+        self.assertEqual(result["parsed"]["query"], {"page": "1", "size": "20"})
+        case = ApiCase.objects.get(id=result["api_case"]["id"])
+        self.assertEqual(case.payload, {"__base_url": "https://example.com", "__query": {"page": "1", "size": "20"}})
+
+    def test_parse_rejects_file_upload(self):
+        with self.assertRaises(CurlImportError) as context:
+            self.service.import_curl(
+                module_id=self.module.id,
+                curl_text="curl 'https://example.com/upload' -F 'file=@/tmp/demo.txt'",
+            )
+
+        self.assertIn("文件上传", str(context.exception))
+
+
+class CurlImportApiTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user = get_user_model().objects.create_user("tester", password="pass123")
+        self.client.force_authenticate(self.user)
+        self.project = Project.objects.create(name="项目A")
+        self.module = Module.objects.create(project=self.project, name="模块A")
+
+    def test_import_curl_api_success(self):
+        response = self.client.post(
+            "/api/imports/curl/",
+            {
+                "module": self.module.id,
+                "name": "用户详情",
+                "curl_text": "curl 'https://example.com/api/user/detail?id=1' -H 'Accept: application/json'",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["api_definition"]["name"], "用户详情")
+        self.assertEqual(response.data["parsed"]["path"], "/api/user/detail")
+        self.assertTrue(ApiDefinition.objects.filter(path="/api/user/detail", method="GET").exists())
+
+    def test_import_curl_api_requires_fields(self):
+        response = self.client.post("/api/imports/curl/", {"module": "", "curl_text": ""}, format="json")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data["detail"], "请选择目标模块")
+
+    def test_import_curl_api_reuses_existing_api(self):
+        api = ApiDefinition.objects.create(
+            module=self.module,
+            name="接口A",
+            path="/api/demo",
+            method="GET",
+        )
+        ApiCase.objects.create(
+            api=api,
+            case_code=f"CURL_AUTO_{api.id}",
+            title="接口A",
+            subtitle="cURL 导入默认用例",
+        )
+
+        response = self.client.post(
+            "/api/imports/curl/",
+            {
+                "module": self.module.id,
+                "curl_text": "curl 'https://example.com/api/demo' -H 'Accept: application/json'",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["action"]["api_definition"], "updated")
+        self.assertEqual(ApiDefinition.objects.filter(module=self.module, path="/api/demo", method="GET").count(), 1)
+
+    def test_import_curl_api_supports_preview(self):
+        response = self.client.post(
+            "/api/imports/curl/",
+            {
+                "module": self.module.id,
+                "curl_text": "curl 'https://example.com/api/demo?id=1'",
+                "dry_run": True,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["action"]["api_definition"], "created")
+        self.assertFalse(ApiDefinition.objects.exists())
+
+
+class CurlImportedCaseExecutionTests(TestCase):
+    def setUp(self):
+        self.project = Project.objects.create(name="项目A")
+        self.environment = Environment.objects.create(
+            project=self.project,
+            name="测试环境",
+            base_url="https://b.geekbang.org",
+        )
+        self.module = Module.objects.create(project=self.project, name="模块A")
+        self.api = ApiDefinition.objects.create(
+            module=self.module,
+            name="课程列表",
+            path="/serv/v1/column/newAll",
+            method="GET",
+        )
+        self.case = ApiCase.objects.create(
+            api=self.api,
+            case_code="CURL_AUTO_1",
+            title="课程列表",
+            payload={"__base_url": "https://time.geekbang.org", "__query": {"page": "1"}},
+        )
+        self.plan = TestPlan.objects.create(name="计划A", project=self.project, environment=self.environment)
+        self.plan.cases.set([self.case])
+        self.task = TestTask.objects.create(plan=self.plan)
+
+    @patch("api.services.db_runner.requests.Session.request")
+    def test_imported_case_uses_curl_base_url_instead_of_environment_base_url(self, mock_request):
+        mock_response = mock_request.return_value
+        mock_response.status_code = 200
+        mock_response.text = "{}"
+        mock_response.json.return_value = {}
+        mock_response.request.headers = {}
+
+        DbTaskRunner(self.task).run()
+
+        mock_request.assert_called_once()
+        args, kwargs = mock_request.call_args
+        self.assertEqual(args[1], "https://time.geekbang.org/serv/v1/column/newAll")
+        self.assertEqual(kwargs["params"], {"page": "1"})

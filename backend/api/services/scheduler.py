@@ -1,3 +1,28 @@
+"""
+backend/api/services/scheduler.py
+
+文件用途
+-------
+定时任务的“业务时间计算”与“任务生成”模块。
+
+Schedule 模型支持两类调度方式：
+1) SIMPLE：简单周期（每天/每周/每 N 小时）
+2) CRON：Cron 表达式（5 段：minute hour day month weekday）
+
+本文件提供：
+- compute_next_run(schedule, base=None)
+  根据 Schedule 配置与当前时间，计算下一次触发时间 next_run_at。
+
+- create_task_from_schedule(schedule)
+  把 Schedule 转换为一次性的 TestTask（并同步更新 Schedule.last_run_at/next_run_at）。
+
+说明
+----
+这里刻意没有直接依赖 Celery：
+- 触发执行由 api/tasks.py 中的 run_due_schedules() 或管理命令/beat 完成
+- 本模块只负责“算时间”和“落库生成任务”，保证职责单一
+"""
+
 from datetime import datetime, time, timedelta
 
 from django.utils import timezone

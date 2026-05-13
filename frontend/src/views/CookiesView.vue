@@ -61,6 +61,12 @@
 </template>
 
 <script setup>
+/*
+ * 文件说明：
+ * 1. Cookie 管理页面，用于查看、启停、删除和批量清理指定环境下的 Cookie 数据。
+ * 2. 页面依赖 projectApi、environmentApi 与 environmentCookieApi，为接口自动化中的会话维持提供可视化运维入口。
+ * 3. 它与登录接口执行结果、环境配置以及后端 Cookie 自动写入机制配合使用，主要承担排障和维护职责。
+ */
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, onMounted, ref } from 'vue'
 import { environmentApi, environmentCookieApi, projectApi } from '../api/resources'

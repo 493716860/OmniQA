@@ -1,8 +1,12 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
 """
-@file: __init__.py.py
-@author: Ron
-@date: 2026/3/23 17:24
-@description: 
+data/__init__.py
+
+文件用途
+-------
+样例数据目录的包标记文件。
+
+`data/` 目录主要用于存放演示/导入样例数据，例如：
+- `控制台首页.xlsx`：用于验证 Excel 导入链路的样例文件
+
+该文件本身没有业务逻辑，作用是让目录具备 Python 包语义，并为后续扩展样例数据脚本保留入口。
 """

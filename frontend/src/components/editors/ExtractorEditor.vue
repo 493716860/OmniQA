@@ -36,6 +36,12 @@
 </template>
 
 <script setup>
+/*
+ * 文件说明：
+ * 1. 变量提取编辑器组件，用于定义从接口响应中抽取变量的规则列表，例如 token、uid 等后续依赖变量。
+ * 2. 组件通过 defineModel 与父级请求配置表单双向同步，常由 RequestConfigEditor 统一承载，再被用例和场景步骤页面复用。
+ * 3. 它只负责前端配置结构的录入与整理，真正的变量提取与上下文传递在后端执行引擎中完成。
+ */
 import { nextTick, ref, watch } from 'vue'
 
 const model = defineModel({ type: Array, default: () => [] })

@@ -35,6 +35,12 @@
 </template>
 
 <script setup>
+/*
+ * 文件说明：
+ * 1. 通用键值对编辑器，主要用于维护请求头等简单对象结构，支持启用/停用、描述和快捷插入 Bearer Token。
+ * 2. 该组件是 RequestConfigEditor 的基础子组件之一，也可供其它需要对象型表单录入的模块复用。
+ * 3. 它负责在“表格行数组”与“普通对象”之间做前端转换，减少业务页面直接处理低层结构的复杂度。
+ */
 import { nextTick, ref, watch } from 'vue'
 
 const model = defineModel({ type: Object, default: () => ({}) })

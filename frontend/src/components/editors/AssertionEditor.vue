@@ -20,9 +20,17 @@
             <template #default="{ row }">
               <el-select v-model="row.operator" @change="emitRules">
                 <el-option label="等于" value="equals" />
+                <el-option label="不等于" value="not_equals" />
                 <el-option label="存在" value="exists" />
                 <el-option label="包含" value="contains" />
                 <el-option label="非空" value="not_empty" />
+                <el-option label="大于" value="gt" />
+                <el-option label="大于等于" value="gte" />
+                <el-option label="小于" value="lt" />
+                <el-option label="小于等于" value="lte" />
+                <el-option label="正则匹配" value="regex" />
+                <el-option label="包含于" value="in" />
+                <el-option label="不包含于" value="not_in" />
               </el-select>
             </template>
           </el-table-column>
@@ -31,7 +39,7 @@
               <el-input
                 v-model="row.value"
                 :disabled="['exists', 'not_empty'].includes(row.operator)"
-                placeholder='0 / success / {"id":1} / [1,2]'
+                placeholder='0 / success / {"id":1} / [1,2] / "^OK$"'
                 @input="emitRules"
               />
             </template>
@@ -62,6 +70,13 @@
 </template>
 
 <script setup>
+/*
+ * 文件说明：
+ * 1. 断言编辑器组件，用于接口用例与场景步骤中维护 expect 配置，支持可视化规则与原始 JSON 双模式编辑。
+ * 2. 该组件通常被 `src/components/editors/RequestConfigEditor.vue` 组合使用，
+ *    最终服务于 CasesView、ScenariosView 等需要配置接口校验规则的页面。
+ * 3. 组件职责聚焦于“前端断言结构的标准化、反标准化与同步展示”，不负责实际断言执行，执行逻辑由后端任务系统完成。
+ */
 import { nextTick, ref, watch } from 'vue'
 
 const model = defineModel({ type: Object, default: () => ({}) })

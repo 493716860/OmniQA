@@ -1,3 +1,20 @@
+"""
+backend/api/management/commands/run_due_schedules.py
+
+文件用途
+-------
+管理命令：手动扫描并触发已到期的定时任务（Schedule）。
+
+为什么需要它？
+-------------
+生产环境通常由 celery beat / 定时器统一调度；
+但在开发环境或演示环境中，你可能不想引入完整的 beat 进程。
+此命令提供一个“按需触发”的入口：
+- 找出 enabled=True 且 next_run_at <= now 的 Schedule
+- create_task_from_schedule(...) 创建 TestTask（并更新 next_run_at）
+- run_test_task.delay(...) 投递给 Celery Worker 执行
+"""
+
 from django.core.management.base import BaseCommand
 from django.utils import timezone
 

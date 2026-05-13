@@ -1,3 +1,23 @@
+"""
+backend/api/management/commands/reset_debug_data.py
+
+文件用途
+-------
+管理命令：重置本地调试数据（接口依赖链路演示用）。
+
+它会做三件事：
+1) 清空大部分业务数据（计划/任务/场景/用例/接口等），保留并重建一套固定链路
+2) 写入“登录 → 企业信息 → SKU 列表 → 绑定列表”的接口定义与用例，并设置 dependencies
+3) 同时写入一个场景用例（ScenarioCase/ScenarioStep），用于展示“场景步骤依赖 + Cookie/变量传递”
+
+面试/演示价值
+------------
+这套数据专门用来演示平台的关键卖点：
+- 依赖拓扑排序（dependency）
+- Cookie 持久化（登录后继续调用业务接口）
+- 变量提取与引用（例如从 sku-list 提取 ${sku} 再用于 bind-list）
+"""
+
 from django.core.management.base import BaseCommand
 from django.db import transaction
 

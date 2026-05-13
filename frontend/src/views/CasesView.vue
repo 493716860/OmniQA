@@ -56,7 +56,7 @@
         />
       </div>
     </div>
-    <el-drawer v-model="visible" :title="form.id ? '编辑用例' : '新增用例'" size="88%">
+    <FullScreenDrawer v-model="visible" :title="form.id ? '编辑用例' : '新增用例'">
       <el-form class="drawer-form" label-width="90px">
         <el-form-item label="接口">
           <el-select v-model="form.api" filterable style="width:100%">
@@ -66,6 +66,9 @@
         <el-form-item label="用例ID"><el-input v-model="form.case_code" /></el-form-item>
         <el-form-item label="标题"><el-input v-model="form.title" /></el-form-item>
         <el-form-item label="子标题"><el-input v-model="form.subtitle" /></el-form-item>
+        <el-form-item label="会话Key">
+          <el-input v-model="form.session_key" placeholder="default / userA / userB" />
+        </el-form-item>
         <el-form-item label="等级"><el-input-number v-model="form.level" :min="1" /></el-form-item>
         <el-form-item label="套件"><el-input v-model="form.suite" placeholder="冒烟 / 回归 / 主流程" /></el-form-item>
         <el-form-item label="标签"><el-input v-model="tagText" placeholder="多个标签用英文逗号分隔，如 smoke,login" /></el-form-item>
@@ -89,14 +92,21 @@
         <el-button @click="visible=false">取消</el-button>
         <el-button type="primary" @click="save">保存</el-button>
       </div>
-    </el-drawer>
+    </FullScreenDrawer>
   </section>
 </template>
 
 <script setup>
+/*
+ * 文件说明：
+ * 1. 接口用例管理页面，在接口定义基础上维护可执行测试用例，包括请求配置、断言、变量提取、标签和依赖关系。
+ * 2. 页面通过 RequestConfigEditor 组合多个编辑器子组件完成复杂配置录入，并依赖 caseApi、apiDefinitionApi 进行数据读写。
+ * 3. 它是测试计划、任务执行与质量看板的重要数据来源，属于接口自动化链路中的核心资产维护页面。
+ */
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { apiDefinitionApi, caseApi } from '../api/resources'
+import FullScreenDrawer from '../components/common/FullScreenDrawer.vue'
 import RequestConfigEditor from '../components/editors/RequestConfigEditor.vue'
 
 const cases = ref([])
@@ -111,6 +121,7 @@ const form = reactive({
   case_code: '',
   title: '',
   subtitle: '',
+  session_key: 'default',
   header: {},
   payload: {},
   expect: {},
@@ -159,11 +170,12 @@ function assignForm(row) {
     expect: cloneJson(row.expect || {}),
     extractors: cloneJson(row.extractors || [])
   })
+  form.session_key = (form.session_key || 'default').trim() || 'default'
   form.dependency_ids = row.dependency_ids || row.dependencies || []
   tagText.value = (row.tags || []).join(',')
 }
 function openCreate() {
-  assignForm({ id: null, api: apis.value[0]?.id, case_code: '', title: '', subtitle: '', header: {}, payload: {}, expect: {}, extractors: [], tags: [], suite: '', estimated_duration_ms: 1000, dependency_ids: [], level: 1, enabled: true, is_setup: false })
+  assignForm({ id: null, api: apis.value[0]?.id, case_code: '', title: '', subtitle: '', session_key: 'default', header: {}, payload: {}, expect: {}, extractors: [], tags: [], suite: '', estimated_duration_ms: 1000, dependency_ids: [], level: 1, enabled: true, is_setup: false })
   visible.value = true
 }
 function openEdit(row) {
